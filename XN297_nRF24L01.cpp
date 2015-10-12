@@ -1,19 +1,13 @@
-#include <SPI.h>
-#include "nRF24L01.h"
-#include "RF24.h"
-#include "printf.h"
+#include "XN297_nRF24L01.h"
 
 #define TXRX_OFF 0
 #define TX_EN    1
 #define RX_EN    2
 
-
 #define CX10A_PACKET_SIZE       19
 #define CX10A_PACKET_PERIOD     6000
 // Bit vector from bit position
 #define BV(bit) (1 << bit)
-
-RF24 radio(9,10);
 
 static int xn297_addr_len;
 static uint8_t xn297_tx_addr[5];
@@ -50,15 +44,48 @@ enum {
         CX10_RECV,
 };
 
-static uint8_t packet[CX10A_PACKET_SIZE]; // CX10A (blue board) has larger packet size
-static uint8_t packet_size;
-static uint16_t packet_period;
-static uint8_t phase;
-static uint8_t bind_phase;
-static uint16_t bind_counter;
+enum TxPower {
+    TXPOWER_100uW,
+    TXPOWER_300uW,
+    TXPOWER_1mW,
+    TXPOWER_3mW,
+    TXPOWER_10mW,
+    TXPOWER_30mW,
+    TXPOWER_100mW,
+    TXPOWER_150mW,
+    TXPOWER_LAST,
+};
+
+uint8_t packet[CX10A_PACKET_SIZE]; // CX10A (blue board) has larger packet size
+uint8_t packet_size;
 
 const uint8_t rx_address[] = { 0xCC, 0xCC, 0xCC, 0xCC, 0xCC };
 const uint64_t rx_address_64 = 0xCCCCCCCCCCull;
+static const uint16_t polynomial = 0x1021;
+static const uint16_t initial    = 0xb5d2;
+
+static uint16_t crc16_update(uint16_t crc, unsigned char a)
+{
+    crc ^= a << 8;
+    for (int i = 0; i < 8; ++i) {
+        if (crc & 0x8000) {
+            crc = (crc << 1) ^ polynomial;
+        } else {
+            crc = crc << 1;
+        }
+    }
+    return crc;
+}
+
+static uint8_t bit_reverse(uint8_t b_in)
+{
+    uint8_t b_out = 0;
+    for (int i = 0; i < 8; ++i) {
+        b_out = (b_out << 1) | (b_in & 1);
+        b_in >>= 1;
+    }
+    return b_out;
+}
 
 void XN297_SetRXAddr(const uint8_t* addr, int len)
 {
@@ -74,38 +101,9 @@ void XN297_SetRXAddr(const uint8_t* addr, int len)
         radio.write_register(RX_ADDR_P0, buf, 5);
 }
 
-static void initialize()
-{
-        packet_size = CX10A_PACKET_SIZE;
-        packet_period = CX10A_PACKET_PERIOD;
-        bind_phase = CX10_BIND2;
-        bind_counter = 0;
-        for (uint8_t i = 0; i < 4; i++)
-                packet[5 + i] = 0xFF; // clear aircraft id
-        packet[9] = 0;
-
-        //initialize_txid();
-        //flags = 0;
-        //flags2 = 0;
-        //cx10_init();
-        phase = bind_phase;
-        //CLOCK_StartTimer(INITIAL_WAIT, cx10_callback);
-}
-
 void NRF24L01_Initialize()
 {
     rf_setup = 0x0F;
-}
-
-
-static uint8_t bit_reverse(uint8_t b_in)
-{
-    uint8_t b_out = 0;
-    for (int i = 0; i < 8; ++i) {
-        b_out = (b_out << 1) | (b_in & 1);
-        b_in >>= 1;
-    }
-    return b_out;
 }
 
 uint8_t XN297_ReadPayload(uint8_t* msg, int len)
@@ -185,22 +183,6 @@ void XN297_SetTXAddr(const uint8_t* addr, int len)
     }
 }
 
-static const uint16_t polynomial = 0x1021;
-static const uint16_t initial    = 0xb5d2;
-
-static uint16_t crc16_update(uint16_t crc, unsigned char a)
-{
-    crc ^= a << 8;
-    for (int i = 0; i < 8; ++i) {
-        if (crc & 0x8000) {
-            crc = (crc << 1) ^ polynomial;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
-}
-
 
 uint8_t XN297_WritePayload(uint8_t* msg, int len)
 {
@@ -243,18 +225,18 @@ uint8_t XN297_WritePayload(uint8_t* msg, int len)
 
 uint8_t NRF24L01_SetPower(uint8_t power)
 {
-    uint8_t nrf_power = 3;
-    //switch(power) {
-    //    case TXPOWER_100uW: nrf_power = 0; break;
-    //    case TXPOWER_300uW: nrf_power = 0; break;
-    //    case TXPOWER_1mW:   nrf_power = 0; break;
-    //    case TXPOWER_3mW:   nrf_power = 1; break;
-    //    case TXPOWER_10mW:  nrf_power = 1; break;
-    //    case TXPOWER_30mW:  nrf_power = 2; break;
-    //    case TXPOWER_100mW: nrf_power = 3; break;
-    //    case TXPOWER_150mW: nrf_power = 3; break;
-    //    default:            nrf_power = 0; break;
-    //};
+    uint8_t nrf_power = 0;
+    switch(power) {
+        case TXPOWER_100uW: nrf_power = 0; break;
+        case TXPOWER_300uW: nrf_power = 0; break;
+        case TXPOWER_1mW:   nrf_power = 0; break;
+        case TXPOWER_3mW:   nrf_power = 1; break;
+        case TXPOWER_10mW:  nrf_power = 1; break;
+        case TXPOWER_30mW:  nrf_power = 2; break;
+        case TXPOWER_100mW: nrf_power = 3; break;
+        case TXPOWER_150mW: nrf_power = 3; break;
+        default:            nrf_power = 0; break;
+    };
     // Power is in range 0..3 for nRF24L01
     rf_setup = (rf_setup & 0xF9) | ((nrf_power & 0x03) << 1);
     return radio.write_register(RF_SETUP, rf_setup);
@@ -263,9 +245,8 @@ uint8_t NRF24L01_SetPower(uint8_t power)
 
 static void send_packet(uint8_t bind)
 {
-        uint8_t offset=0;
-
-        offset = 4;
+        //uint8_t offset=0;
+        //offset = 4;
         packet[0] = bind ? 0xAA : 0x55;
         packet[1] = txid[0];
         packet[2] = txid[1];
@@ -317,73 +298,6 @@ static void send_packet(uint8_t bind)
         //}
 }
 
-static uint16_t cx10_callback()
-{
-        switch (phase) {
-                case CX10_BIND1:
-                        if (bind_counter == 0) {
-                                phase = CX10_DATA;
-                                //PROTOCOL_SetBindState(0);
-                        } else {
-                                send_packet(1);
-                                bind_counter -= 1;
-                        }
-                        break;
-                case CX10_RECV: 
-                printf("Waiting for response2333333333333\n");
-                        if (radio.read_register(STATUS) & BV(RX_DR)) {
-                                XN297_ReadPayload(packet, packet_size);
-                                //char buf[14]; 
-                                //memcpy(buf, packet, packet_size);
-                                //buf[packet_size] = 0;
-                                //printf("Recv: %s \n", buf);
-                                int i = 0;
-                                while (i < packet_size) {
-                                  printf("%02X ",(int)packet[i]);  i++;
-                                }
-                                printf("\n");
-                        }
-                        break;
-                case CX10_BIND2:
-                        //if (radio.available()) {
-                        printf("Waiting for response\n");
-                        if (radio.read_register(STATUS) & BV(RX_DR)) {
-                                XN297_ReadPayload(packet, packet_size);
-                                //char buf[14]; 
-                                //memcpy(buf, packet, packet_size);
-                                //buf[packet_size] = 0;
-                                //printf("Recv: %s \n", buf);
-                                printf("Something arrived !\n");
-                                NRF24L01_SetTxRxMode(TXRX_OFF);
-                                //NRF24L01_SetTxRxMode(TX_EN);
-                                if(packet[9] == 1) {
-                                        phase = CX10_BIND1;
-                                }
-                                NRF24L01_SetTxRxMode(RX_EN);                                
-                                phase = CX10_RECV;
-                        } else {
-                                NRF24L01_SetTxRxMode(TXRX_OFF);
-                                NRF24L01_SetTxRxMode(TX_EN);
-                                //send_packet(1);
-                                delayMicroseconds(300);
-                                // switch to RX mode
-                                NRF24L01_SetTxRxMode(TXRX_OFF);
-                                radio.flush_rx();
-                                NRF24L01_SetTxRxMode(RX_EN);
-                                XN297_Configure(BV(EN_CRC) | BV(CRCO)
-                                                | BV(PWR_UP) | BV(PRIM_RX));
-                        }
-                        break;
-                case CX10_DATA:
-                        send_packet(0);
-                        break;
-        }
-        
-        
-        
-        return packet_period;
-}
-
 uint8_t NRF24L01_SetBitrate(uint8_t bitrate)
 {
         // Note that bitrate 250kbps (and bit RF_DR_LOW) is valid only
@@ -396,32 +310,29 @@ uint8_t NRF24L01_SetBitrate(uint8_t bitrate)
         return radio.write_register(RF_SETUP, rf_setup);
 }
 
-void setup(void)
+void XN297_init() 
 {
-        Serial.begin(57600);
-        printf_begin();
-        printf("\n\rSniff CX10A/\n\r");
-
         txid[0] = 0;
         txid[1] = 0;
         txid[2] = 0;
         txid[3] = 0;
-
         rf_chans[0] = 0x03;
         rf_chans[1] = 0x16;
         rf_chans[2] = 0x2D;
         rf_chans[3] = 0x40;
-
-        initialize();
-        radio.begin();
+        packet_size = CX10A_PACKET_SIZE;
+        for (uint8_t i = 0; i < 4; i++)
+                packet[5 + i] = 0xFF; // clear aircraft id
+        packet[9] = 0;
+radio.begin();
 
         NRF24L01_Initialize();
         NRF24L01_SetTxRxMode(TX_EN);
         XN297_SetTXAddr(rx_address, 5);
         XN297_SetRXAddr(rx_address, 5);
-        
+
         radio.flush_tx();
-        radio.flush_rx(); 
+        radio.flush_rx();
 
         radio.write_register(STATUS, 0x70);
         radio.write_register(EN_AA, 0x00);
@@ -429,25 +340,18 @@ void setup(void)
         radio.write_register(RX_PW_P0, CX10A_PACKET_SIZE);
         radio.write_register(RF_CH, RF_BIND_CHANNEL);
         radio.write_register(RF_SETUP, 0x07);
-        /* For now, already done in begin() */
         NRF24L01_SetBitrate(0); //1M 
-        NRF24L01_SetPower(0);
+        NRF24L01_SetPower(3);
         // this sequence necessary for module from stock tx
         radio.read_register(FEATURE);
         radio.toggle_features();
         radio.read_register(FEATURE);
-
         radio.write_register(DYNPD, 0x00);       // Disable dynamic payload length on all pipes
         radio.write_register(FEATURE, 0x00);     // Set feature bits on
 
-        //
-        // Dump the configuration of the rf unit for debugging
-        //
-        radio.printDetails();
-        delayMicroseconds(500);
+        NRF24L01_SetTxRxMode(TXRX_OFF);
+        NRF24L01_SetTxRxMode(RX_EN);
+        XN297_Configure(BV(EN_CRC) | BV(CRCO) | BV(PWR_UP) | BV(PRIM_RX));
 }
 
-void loop(void)
-{
-        cx10_callback();
-}
+
